@@ -1,461 +1,416 @@
 import discord
 from discord.ext import commands
 import datetime
-import asyncio
+import random
 import os
-from collections import defaultdict, deque
 
-# إعدادات البوت والصلاحيات (Intents)
 intents = discord.Intents.default()
 intents.members = True
 intents.messages = True
 intents.message_content = True
 intents.guilds = True
-intents.moderation = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- الآي دي الخاص بالروم (Channels IDs) ---
-LOG_INVITE = 1557691413666471987      # لوج الدعوات
-LOG_MESSAGES = 1557690879572058145    # لوج الرسايل (والصور/الإيموجي/الاستيكرات)
-LOG_LINKS = 1557699350480560128       # لوج الروابط
-LOG_MUTE = 1557690705596522496        # لوج الكتم
-LOG_CHANNELS = 1557700403154395228    # لوج القنوات
-LOG_ROLES = 1557691659414937700       # لوج الرولات
-LOG_KICK = 1557691161605316690        # لوج الطرد
-LOG_BAN = 1557691284024463430         # لوج البان
-MUTE_ALERT_CHANNEL = 1549178285114785883 # روم تنبيهات الكتم العامة
+# --- الـ IDs المطلوبة بدقة ---
+# فئات التذاكر
+CAT_STORE = 1557847161645961226
+CAT_COMPLAINTS = 1557846007226830929
+CAT_INQUIRIES = 1557846392565670040
 
-# متغيرات لتتبع الحماية (Anti-Spam & Anti-Nuke)
-channel_deletions = defaultdict(deque)
-user_mentions = defaultdict(deque)
-user_messages = defaultdict(deque)
+# رومات لوج اللوحات الخاصة بالتحكم
+LOG_STORE_PANEL = 1557856431615774820
+LOG_INQUIRY_PANEL = 1557856512720769024
+LOG_COMPLAINT_PANEL = 1557856586251112610
+
+# روم الاقتراحات
+SUGGESTIONS_CHANNEL = 1557855702473769050
+
+# روم التقرير الشامل للإغلاق
+LOG_CLOSE_REPORT = 1557690531541159957
+
+# رولات الإداريين لكل قسم
+ROLES_STORE = [1557686249693782036, 1549802988498063524]
+ROLES_COMPLAINT = [1549802988498063524, 1549803238084051055, 1549804378586882058]
+ROLES_INQUIRY = [1549804378586882058, 1549806844112011384]
+
+# رول تحويل التذاكر العامة
+ROLE_TRANSFER_TARGET = 1557736356762091540
+
+# تخزين مؤقت لبيانات التذاكر النشطة
+active_tickets = {}
 
 @bot.event
 async def on_ready():
     print(f"تم تسجيل الدخول بنجاح باسم: {bot.user.name}")
-    print("بوت الحماية جاهز للعمل بكامل الكفاءة!")
+    print("بوت التذاكر جاهز للعمل بكامل الكفاءة!")
 
-# ----------------------------------------------------
-# 1. نظام تتبع الدعوات (Invite Tracking)
-# ----------------------------------------------------
-invites_cache = {}
 
-@bot.event
-async def on_guild_join(guild):
-    try:
-        invites_cache[guild.id] = await guild.invites()
-    except Exception:
-        pass
+# ==========================================
+# 1. نافذة إدخال بيانات التذاكر والاقتراحات
+# ==========================================
+class TicketModal(discord.ui.Modal):
+    def __init__(self, ticket_type):
+        super().setTitle("قسم التذاكر والدعم الفني")
+        self.ticket_type = ticket_type
 
-@bot.event
-async def on_invite_create(invite):
-    try:
-        invites_cache[invite.guild.id] = await invite.guild.invites()
-    except Exception:
-        pass
-
-@bot.event
-async def on_invite_delete(invite):
-    try:
-        invites_cache[invite.guild.id] = await invite.guild.invites()
-    except Exception:
-        pass
-
-@bot.event
-async def on_member_join(member):
-    guild = member.guild
-    log_channel = guild.get_channel(LOG_INVITE)
-    if not log_channel:
-        return
-
-    try:
-        old_invites = invites_cache.get(guild.id, [])
-        new_invites = await guild.invites()
-        invites_cache[guild.id] = new_invites
-        
-        inviter = None
-        for new_inv in new_invites:
-            for old_inv in old_invites:
-                if new_inv.code == old_inv.code and new_inv.uses > old_inv.uses:
-                    inviter = new_inv.inviter
-                    break
-            if inviter:
-                break
-
-        embed = discord.Embed(
-            title="📥 انضمام عضو جديد",
-            description=f"العضو الجديد: {member.mention}\nتم دعوته بواسطة: {inviter.mention if inviter else 'غير معروف (رابط مباشر أو مجهول)'}",
-            color=discord.Color.green(),
-            timestamp=datetime.datetime.utcnow()
+        self.name_input = discord.ui.TextInput(
+            label="اسمك",
+            placeholder="اكتب اسمك هنا...",
+            required=True,
+            max_length=100
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        await log_channel.send(embed=embed)
-    except Exception as e:
-        print(f"خطأ في تتبع الدعوات: {e}")
+        self.add_item(self.name_input)
 
-# ----------------------------------------------------
-# 2 & 9. مراقبة تعديل/حذف الرسائل وإعادة توجيه الوسائط
-# ----------------------------------------------------
-@bot.event
-async def on_message_delete(message):
-    if message.author.bot:
-        return
-    log_channel = message.guild.get_channel(LOG_MESSAGES)
-    if not log_channel:
-        return
+        if ticket_type == "المتجر":
+            label_text = "سبب إنشاء التذكرة"
+        elif ticket_type == "شكوي":
+            label_text = "تفاصيل الشكوى"
+        elif ticket_type == "إستفسار":
+            label_text = "تفاصيل الاستفسار"
+        else:
+            label_text = "التفاصيل"
 
-    embed = discord.Embed(
-        title="🗑️ حذف رسالة",
-        description=f"**المستخدم:** {message.author.mention}\n**الروم:** {message.channel.mention}\n**الرسالة المحذوفة:**\n{message.content or '*بدون نص (ميديا فقط)*'}",
-        color=discord.Color.red(),
-        timestamp=datetime.datetime.utcnow()
-    )
-    await log_channel.send(embed=embed)
+        self.detail_input = discord.ui.TextInput(
+            label=label_text,
+            style=discord.TextStyle.paragraph,
+            placeholder="اكتب التفاصيل هنا...",
+            required=True,
+            max_length=1000
+        )
+        self.add_item(self.detail_input)
 
-@bot.event
-async def on_message_edit(before, after):
-    if before.author.bot or before.content == after.content:
-        return
-    log_channel = before.guild.get_channel(LOG_MESSAGES)
-    if not log_channel:
-        return
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        user = interaction.user
+        now = datetime.datetime.utcnow()
 
-    embed = discord.Embed(
-        title="✏️ تعديل رسالة",
-        description=f"**المستخدم:** {before.author.mention}\n**الروم:** {before.channel.mention}\n**قبل التعديل:**\n{before.content}\n\n**بعد التعديل:**\n{after.content}",
-        color=discord.Color.orange(),
-        timestamp=datetime.datetime.utcnow()
-    )
-    await log_channel.send(embed=embed)
+        user_name = self.name_input.value
+        user_details = self.detail_input.value
+        ticket_id = str(random.randint(100000, 999999))
 
-# ----------------------------------------------------
-# 3, 7, 8 & 10. نظام منع الروابط، المنشنات، التكرار، والوسائط (Mute & Logging)
-# ----------------------------------------------------
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    if not message.guild:
-        await bot.process_commands(message)
-        return
-
-    guild = message.guild
-    author = message.author
-    now = datetime.datetime.utcnow()
-
-    # أ. إعادة توجيه الصور، الإيموجي، والاستيكرات بشكل مباشر وحقيقي في لوج الرسائل
-    if message.attachments or message.stickers or len(message.raw_emojis) > 0:
-        media_log = guild.get_channel(LOG_MESSAGES)
-        if media_log:
-            forward_content = f"📤 **إعادة توجيه ميديا من:** {author.mention} | **الروم:** {message.channel.mention}\n"
-            if message.content:
-                forward_content += f"**النص:** {message.content}"
-            
-            files = [await att.to_file() for att in message.attachments] if message.attachments else []
-            try:
-                await media_log.send(content=forward_content, files=files)
-            except Exception:
-                pass
-
-    # ب. فلتر الروابط (أي رابط خارجي أو يوتيوب/تيك توك/ديسكورد)
-    content_lower = message.content.lower()
-    if "http://" in content_lower or "https://" in content_lower or "discord.gg/" in content_lower or "www." in content_lower:
-        try:
-            await message.delete()
-        except Exception as e:
-            print(f"فشل حذف الرابط: {e}")
-
-        # 1. إرسال الرابط المحذوف مع منشن الشخص في روم لوج الروابط
-        link_log = guild.get_channel(LOG_LINKS)
-        if link_log:
-            embed = discord.Embed(
-                title="🔗 مخالفة: إرسال رابط خارجي",
-                description=f"**العضو:** {author.mention}\n**الروم:** {message.channel.mention}\n**الرابط المحذوف:**\n{message.content}",
-                color=discord.Color.dark_red(),
-                timestamp=now
-            )
-            try:
-                await link_log.send(content=f"⚠️ تنبيه بخصوص العضو: {author.mention}", embed=embed)
-            except:
-                pass
-
-        # 2. كتم العضو لمدة ساعة
-        duration = datetime.timedelta(hours=1)
-        try:
-            await author.timeout(duration, reason="إرسال روابط خارجية ممنوعة")
-        except Exception as e:
-            print(f"فشل الكتم (تأكد من رتبة البوت): {e}")
-
-        # 3. إرسال رسالة التنبيه في الروم العامة المحددة
-        alert_channel = guild.get_channel(MUTE_ALERT_CHANNEL)
-        if alert_channel:
-            try:
-                await alert_channel.send(f"تم كتم {author.mention} تلقائيا بسبب مخالفة قوانين السيرفر")
-            except:
-                pass
-
-        # 4. إرسال التقرير التفصيلي في روم لوج الكتم
-        mute_log = guild.get_channel(LOG_MUTE)
-        if mute_log:
-            embed_mute = discord.Embed(
-                title="🔇 سجل كتم إداري (تلقائي - روابط)",
-                description=f"**العضو المكتوم:** {author.mention}\n**المسؤول:** نظام الحماية التلقائي\n**السبب:** إرسال روابط خارجية ممنوعة\n**المدة:** ساعة واحدة",
-                color=discord.Color.dark_purple(),
-                timestamp=now
-            )
-            try:
-                await mute_log.send(embed=embed_mute)
-            except:
-                pass
-
-        return
-
-    # ج. منع المنشنات الجماعية (>= 3 منشنات في 10 ثوانٍ)
-    if len(message.mentions) >= 3:
-        user_mentions[author.id].append(now)
-        while user_mentions[author.id] and (now - user_mentions[author.id][0]).total_seconds() > 10:
-            user_mentions[author.id].popleft()
-
-        if len(user_mentions[author.id]) >= 3:
-            duration = datetime.timedelta(hours=1)
-            try:
-                await author.timeout(duration, reason="سبام منشنات جماعية")
-            except:
-                pass
-
-            alert_channel = guild.get_channel(MUTE_ALERT_CHANNEL)
-            if alert_channel:
-                try:
-                    await alert_channel.send(f"تم كتم {author.mention} تلقائيا بسبب مخالفة قوانين السيرفر")
-                except:
-                    pass
-
-            mute_log = guild.get_channel(LOG_MUTE)
-            if mute_log:
+        # أ. التعامل مع قسم الاقتراحات (بدون فتح روم)
+        if self.ticket_type == "إقتراح":
+            sug_channel = guild.get_channel(SUGGESTIONS_CHANNEL)
+            if sug_channel:
                 embed = discord.Embed(
-                    title="🔇 سجل كتم إداري (تلقائي - سبام منشن)",
-                    description=f"**العضو المكتوم:** {author.mention}\n**المسؤول:** نظام الحماية التلقائي\n**السبب:** عمل أكثر من 3 منشنات في وقت قصير\n**المدة:** ساعة واحدة",
-                    color=discord.Color.dark_purple(),
+                    title="💡 إقتراح جديد",
+                    description=f"**مقدم الإقتراح:** {user.mention}\n\n**العنوان:** {user_name}\n**الشرح والتفاصيل:**\n{user_details}",
+                    color=discord.Color.gold(),
                     timestamp=now
                 )
-                try:
-                    await mute_log.send(embed=embed)
-                except:
-                    pass
+                await sug_channel.send(embed=embed)
+            
+            # إرسال رسالة في الخاص للاعب
+            try:
+                await user.send(f"نشكرك {user.mention} علي تقديم إقتراحك وسعيك المستمر في نجاح السيرفر 👑")
+            except:
+                pass
 
-            user_mentions[author.id].clear()
+            await interaction.response.send_message("✅ تم إرسال اقتراحك بنجاح، شكراً لك!", ephemeral=True)
             return
 
-    # د. منع تكرار الرسائل (3 رسائل ورا بعض في أقل من 10 ثواني)
-    user_messages[author.id].append(now)
-    while user_messages[author.id] and (now - user_messages[author.id][0]).total_seconds() > 10:
-        user_messages[author.id].popleft()
+        # ب. تحديد الفئة ورولات الإداريين حسب نوع التذكرة
+        if self.ticket_type == "المتجر":
+            category_id = CAT_STORE
+            panel_log_id = LOG_STORE_PANEL
+            roles_list = ROLES_STORE
+        elif self.ticket_type == "شكوي":
+            category_id = CAT_COMPLAINTS
+            panel_log_id = LOG_COMPLAINT_PANEL
+            roles_list = ROLES_COMPLAINT
+        else: # إستفسار
+            category_id = CAT_INQUIRIES
+            panel_log_id = LOG_INQUIRY_PANEL
+            roles_list = ROLES_INQUIRY
 
-    if len(user_messages[author.id]) >= 3:
-        duration = datetime.timedelta(hours=1)
-        try:
-            await author.timeout(duration, reason="سبام رسائل متكررة وسريعة")
-        except:
-            pass
-
-        alert_channel = guild.get_channel(MUTE_ALERT_CHANNEL)
-        if alert_channel:
-            try:
-                await alert_channel.send(f"تم كتم {author.mention} تلقائيا بسبب مخالفة قوانين السيرفر")
-            except:
-                pass
-
-        mute_log = guild.get_channel(LOG_MUTE)
-        if mute_log:
-            embed = discord.Embed(
-                title="🔇 سجل كتم إداري (تلقائي - سبام رسائل)",
-                description=f"**العضو المكتوم:** {author.mention}\n**المسؤول:** نظام الحماية التلقائي\n**السبب:** إرسال رسائل متعددة وسريعة بشكل متكرر\n**المدة:** ساعة واحدة",
-                color=discord.Color.dark_purple(),
-                timestamp=now
-            )
-            try:
-                await mute_log.send(embed=embed)
-            except:
-                pass
-
-        user_messages[author.id].clear()
-        return
-
-    # معالجة الأوامر العادية في نهاية الحدث
-    await bot.process_commands(message)
-
-# ----------------------------------------------------
-# 4. مراقبة القنوات وحماية السيرفر (Anti-Mass Channel Delete)
-# ----------------------------------------------------
-@bot.event
-async def on_guild_channel_create(channel):
-    guild = channel.guild
-    log_channel = guild.get_channel(LOG_CHANNELS)
-    if not log_channel:
-        return
-
-    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_create):
-        user = entry.user
-        embed = discord.Embed(
-            title="📁 إنشاء روم جديدة",
-            description=f"**المسؤول:** {user.mention}\n**اسم الروم:** {channel.name}\n**الرابط:** {channel.jump_url}",
-            color=discord.Color.blurple(),
-            timestamp=datetime.datetime.utcnow()
-        )
-        await log_channel.send(embed=embed)
-        break
-
-@bot.event
-async def on_guild_channel_delete(channel):
-    guild = channel.guild
-    log_channel = guild.get_channel(LOG_CHANNELS)
-    if not log_channel:
-        return
-
-    now = datetime.datetime.utcnow()
-    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
-        user = entry.user
+        category = guild.get_channel(category_id)
         
-        embed = discord.Embed(
-            title="🗑️ حذف روم",
-            description=f"**المسؤول:** {user.mention}\n**اسم الروم المحذوفة:** {channel.name}",
-            color=discord.Color.dark_red(),
+        # صلاحيات الروم الجديدة
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
+        }
+        for r_id in roles_list:
+            role = guild.get_role(r_id)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+        # إنشاء روم التيكت باسم الرقم العشوائي
+        ticket_channel = await guild.create_text_channel(
+            name=f"ticket-{ticket_id}",
+            category=category,
+            overwrites=overwrites
+        )
+
+        # تنسيق منشن الجهات المختصة تحت بعضها
+        mentions_str = "\n".join([f"<@&{r_id}>" for r_id in roles_list])
+
+        # رسالة داخل روم التيكت
+        embed_ticket = discord.Embed(
+            title="🎟️ تذكرة جديدة",
+            description=f"قام {user.mention} بإنشاء تذكرة للتو!\n\n"
+                        f"**التفاصيل المقدمة:**\n{user_details}\n**الاسم:** {user_name}\n\n"
+                        f"**رقم التذكرة:** `{ticket_id}`\n"
+                        f"**وقت وتاريخ الإنشاء:** {now.strftime('%Y-%m-%d | %H:%M:%S')}\n\n"
+                        f"**الجهات المختصة:**\n{mentions_str}",
+            color=discord.Color.blue(),
             timestamp=now
         )
-        await log_channel.send(embed=embed)
+        await ticket_channel.send(embed=embed_ticket)
 
-        channel_deletions[user.id].append(now)
-        while channel_deletions[user.id] and (now - channel_deletions[user.id][0]).total_seconds() > 60:
-            channel_deletions[user.id].popleft()
+        # حفظ بيانات التذكرة في الذاكرة المؤقتة
+        active_tickets[ticket_channel.id] = {
+            "ticket_id": ticket_id,
+            "user_id": user.id,
+            "ticket_type": self.ticket_type,
+            "user_name": user_name,
+            "user_details": user_details,
+            "created_at": now.strftime('%Y-%m-%d | %H:%M:%S'),
+            "claimed_by": None,
+            "claimed_at": None,
+            "transferred_to": None,
+            "roles_list": roles_list
+        }
 
-        if len(channel_deletions[user.id]) > 3:
-            member = guild.get_member(user.id)
-            if member:
-                try:
-                    for role in member.roles:
-                        if role.permissions.administrator or role.permissions.manage_channels:
-                            await member.remove_roles(role, reason="تخريب السيرفر: حذف رومات متعددة")
-                    
-                    if log_channel:
-                        await log_channel.send(f"🚨 **تحذير أمني خطير!** تم سحب الصلاحيات فوراً من {member.mention} لتخطيه الحد المسموح لحذف الرومات.")
-                except Exception as e:
-                    print(f"خطأ في سحب الصلاحيات: {e}")
-        break
+        # إرسال لوحة التحكم المستقلة في الروم المخصصة لها
+        panel_log_channel = guild.get_channel(panel_log_id)
+        if panel_log_channel:
+            embed_panel = discord.Embed(
+                title=f"🎛️ لوحة تحكم تذكرة: {ticket_id}",
+                description=f"**اللاعب:** {user.mention}\n**نوع التذكرة:** {self.ticket_type}\n**رقم التذكرة:** `{ticket_id}`",
+                color=discord.Color.dark_theme(),
+                timestamp=now
+            )
+            view = TicketControlView()
+            panel_msg = await panel_log_channel.send(embed=embed_panel, view=view)
+            active_tickets[ticket_channel.id]["panel_msg_id"] = panel_msg.id
+            active_tickets[ticket_channel.id]["panel_channel_id"] = panel_log_channel.id
 
-# ----------------------------------------------------
-# 5. مراقبة تعديلات الرولات والصلاحيات (Roles Logging)
-# ----------------------------------------------------
-@bot.event
-async def on_guild_role_create(role):
-    log_channel = role.guild.get_channel(LOG_ROLES)
-    if not log_channel:
-        return
-    async for entry in role.guild.audit_logs(limit=1, action=discord.AuditLogAction.role_create):
-        embed = discord.Embed(
-            title="✨ إنشاء رول جديد",
-            description=f"**المسؤول:** {entry.user.mention}\n**اسم الرول:** {role.name}",
-            color=discord.Color.green(),
-            timestamp=datetime.datetime.utcnow()
+        await interaction.response.send_message(f"✅ تم فتح تذكرتك بنجاح: {ticket_channel.mention}", ephemeral=True)
+
+
+# ==========================================
+# 2. القائمة المنسدلة للواجهة الأساسية
+# ==========================================
+class TicketSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="المتجر", description="لشراء الخدمات والمنتجات", emoji="🛍"),
+            discord.SelectOption(label="شكوي", description="تقديم شكوى ضد لاعب أو إداري", emoji="📕"),
+            discord.SelectOption(label="إستفسار", description="طرح الأسئلة والاستفسارات العامة", emoji="📘"),
+            discord.SelectOption(label="إقتراح", description="تقديم اقتراحات لتطوير السيرفر", emoji="💡")
+        ]
+        super().__init__(placeholder="يرجى اختيار الموضوع المناسب", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(TicketModal(self.values[0]))
+
+class TicketSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketSelect())
+
+
+# ==========================================
+# 3. قائمة اختيار الإداري عند التحويل
+# ==========================================
+class AdminSelect(discord.ui.Select):
+    def __init__(self, guild):
+        role = guild.get_role(ROLE_TRANSFER_TARGET)
+        options = []
+        if role:
+            for member in role.members[:25]: # ديسكورد يتيح حتى 25 خياراً كحد أقصى في القائمة
+                options.append(discord.SelectOption(label=member.display_name, value=str(member.id)))
+        
+        if not options:
+            options.append(discord.SelectOption(label="لا يوجد إداريين متاحين", value="none"))
+
+        super().__init__(placeholder="اختر الإداري المراد تحويل التذكرة إليه", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            await interaction.response.send_message("❌ لا يوجد إداريين متاحين في هذه الرول حالياً.", ephemeral=True)
+            return
+
+        admin_id = int(self.values[0])
+        guild = interaction.guild
+        admin_member = guild.get_member(admin_id)
+        
+        ticket_data = active_tickets.get(interaction.channel.id)
+        if ticket_data:
+            ticket_data["transferred_to"] = admin_member.mention
+            await interaction.channel.send(f"تم تحويل تذكرتك للإداري {admin_member.mention}")
+            await interaction.response.send_message(f"✅ تم تحويل التذكرة بنجاح إلى {admin_member.mention}", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ حدث خطأ، لم يتم العثور على بيانات هذه التذكرة.", ephemeral=True)
+
+class AdminSelectView(discord.ui.View):
+    def __init__(self, guild):
+        super().__init__(timeout=60)
+        self.add_item(AdminSelect(guild))
+
+
+# ==========================================
+# 4. نموذج سبب إغلاق التذكرة
+# ==========================================
+class CloseReasonModal(discord.ui.Modal):
+    def __init__(self, ticket_channel, panel_message, ticket_data):
+        super().setTitle("إغلاق التذكرة")
+        self.ticket_channel = ticket_channel
+        self.panel_message = panel_message
+        self.ticket_data = ticket_data
+
+        self.reason_input = discord.ui.TextInput(
+            label="ملخص الشكوى أو سبب الغلق",
+            style=discord.TextStyle.paragraph,
+            placeholder="اكتب ملخص ما حدث أو سبب إغلاق التذكرة...",
+            required=True,
+            max_length=1000
         )
-        await log_channel.send(embed=embed)
-        break
+        self.add_item(self.reason_input)
 
-@bot.event
-async def on_guild_role_delete(role):
-    log_channel = role.guild.get_channel(LOG_ROLES)
-    if not log_channel:
-        return
-    async for entry in role.guild.audit_logs(limit=1, action=discord.AuditLogAction.role_delete):
-        embed = discord.Embed(
-            title="🗑️ حذف رول",
-            description=f"**المسؤول:** {entry.user.mention}\n**اسم الرول المحذوف:** {role.name}",
-            color=discord.Color.red(),
-            timestamp=datetime.datetime.utcnow()
-        )
-        await log_channel.send(embed=embed)
-        break
+    async def on_submit(self, interaction: discord.Interaction):
+        close_summary = self.reason_input.value
+        guild = interaction.guild
+        now = datetime.datetime.utcnow()
 
-# ----------------------------------------------------
-# 6. لوج العقوبات الإدارية اليدوية (Mute, Kick, Ban) بمعلومات تفصيلية
-# ----------------------------------------------------
-@bot.event
-async def on_member_update(before, after):
-    # 1. مراقبة تعديل رولات عضو
-    log_channel_roles = after.guild.get_channel(LOG_ROLES)
-    if log_channel_roles and before.roles != after.roles:
-        added_roles = [r for r in after.roles if r not in before.roles]
-        removed_roles = [r for r in before.roles if r not in after.roles]
+        t_data = self.ticket_data
+        opener = guild.get_member(t_data["user_id"])
 
-        async for entry in after.guild.audit_logs(limit=1, action=discord.AuditLogAction.member_role_update):
-            user = entry.user
-            desc = f"**العضو:** {after.mention}\n**المسؤول:** {user.mention}\n"
-            if added_roles:
-                desc += f"**تمت إضافة رول:** {', '.join([r.name for r in added_roles])}\n"
-            if removed_roles:
-                desc += f"**تمت إزالة رول:** {', '.join([r.name for r in removed_roles])}\n"
-
-            embed = discord.Embed(
-                title="🔄 تعديل رولات عضو (إداري)",
-                description=desc,
-                color=discord.Color.gold(),
-                timestamp=datetime.datetime.utcnow()
+        # 1. إرسال التقرير الشامل لروم لوج الإدارة
+        report_channel = guild.get_channel(LOG_CLOSE_REPORT)
+        if report_channel:
+            embed_report = discord.Embed(
+                title="📋 تقرير إغلاق تذكرة شامل",
+                description=f"**صاحب التذكرة:** {opener.mention if opener else 'مستخدم مغادر'}\n"
+                            f"**رقم التذكرة:** `{t_data['ticket_id']}`\n"
+                            f"**نوع التذكرة:** {t_data['ticket_type']}\n"
+                            f"**وقت وتاريخ الإنشاء:** {t_data['created_at']}\n"
+                            f"**وقت وتاريخ الاستلام:** {t_data['claimed_at'] or 'لم يتم الاستلام'}\n"
+                            f"**المسؤول (المستلم):** {t_data['claimed_by'] or 'لا يوجد'}\n"
+                            f"**المسؤول (المحول إليه):** {t_data['transferred_to'] or 'لم يتم التحويل'}\n\n"
+                            f"**تفاصيل اللاعب الأساسية:**\n{t_data['user_details']}\n\n"
+                            f"**ملخص الإغلاق / الشكوى:**\n{close_summary}",
+                color=discord.Color.red(),
+                timestamp=now
             )
-            await log_channel_roles.send(embed=embed)
-            break
+            await report_channel.send(embed=embed_report)
 
-    # 2. مراقبة الكتم اليدوي الإداري (Timeout) وتفاصيل أعمق
-    if before.timed_out_until != after.timed_out_until and after.timed_out_until is not None:
-        guild = after.guild
-        log_channel_mute = guild.get_channel(LOG_MUTE)
-        if log_channel_mute:
-            async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.member_update):
-                if entry.target.id == after.id:
-                    reason = entry.reason or "لا يوجد سبب مرفق"
-                    embed = discord.Embed(
-                        title="🔇 سجل كتم إداري (يدوي)",
-                        description=f"**العضو المكتوم:** {after.mention}\n**المسؤول:** {entry.user.mention}\n**السبب:** {reason}\n**حتى تاريخ/وقت:** {after.timed_out_until}",
-                        color=discord.Color.purple(),
-                        timestamp=datetime.datetime.utcnow()
-                    )
-                    await log_channel_mute.send(embed=embed)
-                    break
+        # 2. إرسال التقرير الخاص للاعب في الخاص
+        if opener:
+            try:
+                embed_dm = discord.Embed(
+                    title="🔒 تم إغلاق تذكرتك",
+                    description=f"**منشئ التذكرة:** {opener.mention}\n"
+                                f"**نوع التذكرة:** {t_data['ticket_type']}\n"
+                                f"**رقم التذكرة:** `{t_data['ticket_id']}`\n"
+                                f"**الإداري المسؤول:** {t_data['claimed_by'] or 'فريق الإدارة'}\n\n"
+                                f"**ملخص الشكوى / الختام:**\n{close_summary}",
+                    color=discord.Color.purple(),
+                    timestamp=now
+                )
+                await opener.send(embed=embed_dm)
+            except:
+                pass
 
-@bot.event
-async def on_member_remove(member):
-    guild = member.guild
-    log_channel = guild.get_channel(LOG_KICK)
-    if not log_channel:
-        return
-    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
-        if entry.target.id == member.id:
-            reason = entry.reason or "لا يوجد سبب مرفق"
-            embed = discord.Embed(
-                title="👢 سجل طرد عضو (Kick)",
-                description=f"**العضو المطرود:** {member.mention}\n**المسؤول:** {entry.user.mention}\n**السبب:** {reason}",
-                color=discord.Color.orange(),
-                timestamp=datetime.datetime.utcnow()
-            )
-            await log_channel.send(embed=embed)
-            break
+        # حذف رسالة لوحة التحكم والتهيئة
+        if self.panel_message:
+            try:
+                await self.panel_message.delete()
+            except:
+                pass
 
-@bot.event
-async def on_member_ban(guild, user):
-    log_channel = guild.get_channel(LOG_BAN)
-    if not log_channel:
-        return
-    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
-        if entry.target.id == user.id:
-            reason = entry.reason or "log_ban"
-            embed = discord.Embed(
-                title="🔨 سجل حظر عضو (Ban)",
-                description=f"**العضو المحظور:** {user.mention}\n**المسؤول:** {entry.user.mention}\n**السبب:** {reason}",
-                color=discord.Color.dark_red(),
-                timestamp=datetime.datetime.utcnow()
-            )
-            await log_channel.send(embed=embed)
-            break
+        # حذف روم التذكرة
+        if self.ticket_channel in active_tickets:
+            del active_tickets[self.ticket_channel.id]
 
-# تشغيل البوت باستخدام متغير البيئة بأمان تام
+        await interaction.response.send_message("🔒 جاري إغلاق الحذف وحذف الروم...", ephemeral=True)
+        await self.ticket_channel.delete()
+
+
+# ==========================================
+# 5. أزرار التحكم في اللوحة (استلام، تحويل، غلق)
+# ==========================================
+class TicketControlView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="استلام", style=discord.ButtonStyle.green, emoji="📥", custom_id="claim_ticket_btn")
+    async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel_id = None
+        for cid, data in active_tickets.items():
+            if data.get("panel_msg_id") == interaction.message.id:
+                channel_id = cid
+                break
+
+        if not channel_id:
+            await interaction.response.send_message("❌ عذراً، لم يتم العثور على روم هذه التذكرة.", ephemeral=True)
+            return
+
+        ticket_channel = interaction.guild.get_channel(channel_id)
+        now_str = datetime.datetime.utcnow().strftime('%Y-%m-%d | %H:%M:%S')
+
+        active_tickets[channel_id]["claimed_by"] = interaction.user.mention
+        active_tickets[channel_id]["claimed_at"] = now_str
+
+        if ticket_channel:
+            await ticket_channel.send(f"قام الإداري {interaction.user.mention} بإستلام تذكرتك الآن")
+
+        await interaction.response.send_message(f"✅ تم استلام التذكرة بنجاح بواسطة {interaction.user.mention}", ephemeral=True)
+
+    @discord.ui.button(label="تحويل", style=discord.ButtonStyle.blurple, emoji="🔄", custom_id="transfer_ticket_btn")
+    async def transfer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel_id = None
+        for cid, data in active_tickets.items():
+            if data.get("panel_msg_id") == interaction.message.id:
+                channel_id = cid
+                break
+
+        if not channel_id:
+            await interaction.response.send_message("❌ عذراً، لم يتم العثور على روم هذه التذكرة.", ephemeral=True)
+            return
+
+        view = AdminSelectView(interaction.guild)
+        await interaction.response.send_message("اختر الإداري للتحويل:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="غلق", style=discord.ButtonStyle.red, emoji="🔒", custom_id="close_ticket_btn")
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel_id = None
+        for cid, data in active_tickets.items():
+            if data.get("panel_msg_id") == interaction.message.id:
+                channel_id = cid
+                break
+
+        if not channel_id:
+            await interaction.response.send_message("❌ عذراً، هذه التذكرة غير مسجلة أو مغلقة مسبقاً.", ephemeral=True)
+            return
+
+        ticket_channel = interaction.guild.get_channel(channel_id)
+        ticket_data = active_tickets[channel_id]
+
+        await interaction.response.send_modal(CloseReasonModal(ticket_channel, interaction.message, ticket_data))
+
+
+# ==========================================
+# 6. أمر إعداد اللوحة الأساسية
+# ==========================================
+@bot.command(name="setup")
+@commands.has_permissions(administrator=True)
+async def setup_panel(ctx):
+    await ctx.message.delete()
+    
+    embed = discord.Embed(
+        title="**قسم التذاكر والدعم الفني**",
+        description="مرحباً بك في قسم التذاكر والدعم الفني يرجي اختيار الموضوع المناسب لنساعدك في اقرب وقت ممكن",
+        color=discord.Color.from_rgb(30, 30, 30)
+    )
+    embed.set_image(url="https://cdn.discordapp.com/attachments/1557691888012632094/1557692056434905108/1791452190631.jpg?ex=6ac8b946&is=6ac767c6&hm=d42158f136fa773b6dc4874f1e1dd0fbabfa145f665af2791ef03311abcd93e5&")
+    
+    view = TicketSelectView()
+    await ctx.send(embed=embed, view=view)
+
+
+# تشغيل البوت بأمان باستخدام المتغير البيئي
 bot.run(os.getenv("DISCORD_TOKEN"))
