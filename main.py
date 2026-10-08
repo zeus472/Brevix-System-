@@ -134,7 +134,10 @@ async def on_message_edit(before, after):
 # ----------------------------------------------------
 @bot.event
 async def on_message(message):
-    if message.author.bot or not message.guild:
+    if message.author.bot:
+        return
+
+    if not message.guild:
         await bot.process_commands(message)
         return
 
@@ -150,19 +153,19 @@ async def on_message(message):
             if message.content:
                 forward_content += f"**النص:** {message.content}"
             
-            # تجميع الملفات المرفقة إن وجدت لضمان إرسالها بالكامل
             files = [await att.to_file() for att in message.attachments] if message.attachments else []
             try:
                 await media_log.send(content=forward_content, files=files)
             except Exception:
                 pass
 
-    # ب. فلتر الروابط (أي رابط خارجي أو يوتيوب/تيك توك)
-    if "http://" in message.content or "https://" in message.content or "discord.gg/" in message.content or "www." in message.content:
+    # ب. فلتر الروابط (أي رابط خارجي أو يوتيوب/تيك توك/ديسكورد)
+    content_lower = message.content.lower()
+    if "http://" in content_lower or "https://" in content_lower or "discord.gg/" in content_lower or "www." in content_lower:
         try:
             await message.delete()
-        except:
-            pass
+        except Exception as e:
+            print(f"فشل حذف الرابط: {e}")
 
         # 1. إرسال الرابط المحذوف مع منشن الشخص في روم لوج الروابط
         link_log = guild.get_channel(LOG_LINKS)
@@ -173,19 +176,25 @@ async def on_message(message):
                 color=discord.Color.dark_red(),
                 timestamp=now
             )
-            await link_log.send(content=f"⚠️ تنبيه بخصوص العضو: {author.mention}", embed=embed)
+            try:
+                await link_log.send(content=f"⚠️ تنبيه بخصوص العضو: {author.mention}", embed=embed)
+            except:
+                pass
 
         # 2. كتم العضو لمدة ساعة
         duration = datetime.timedelta(hours=1)
         try:
             await author.timeout(duration, reason="إرسال روابط خارجية ممنوعة")
-        except:
-            pass
+        except Exception as e:
+            print(f"فشل الكتم (تأكد من رتبة البوت): {e}")
 
         # 3. إرسال رسالة التنبيه في الروم العامة المحددة
         alert_channel = guild.get_channel(MUTE_ALERT_CHANNEL)
         if alert_channel:
-            await alert_channel.send(f"تم كتم {author.mention} تلقائيا بسبب مخالفة قوانين السيرفر")
+            try:
+                await alert_channel.send(f"تم كتم {author.mention} تلقائيا بسبب مخالفة قوانين السيرفر")
+            except:
+                pass
 
         # 4. إرسال التقرير التفصيلي في روم لوج الكتم
         mute_log = guild.get_channel(LOG_MUTE)
@@ -196,7 +205,10 @@ async def on_message(message):
                 color=discord.Color.dark_purple(),
                 timestamp=now
             )
-            await mute_log.send(embed=embed_mute)
+            try:
+                await mute_log.send(embed=embed_mute)
+            except:
+                pass
 
         return
 
@@ -215,7 +227,10 @@ async def on_message(message):
 
             alert_channel = guild.get_channel(MUTE_ALERT_CHANNEL)
             if alert_channel:
-                await alert_channel.send(f"تم كتم {author.mention} تلقائيا بسبب مخالفة قوانين السيرفر")
+                try:
+                    await alert_channel.send(f"تم كتم {author.mention} تلقائيا بسبب مخالفة قوانين السيرفر")
+                except:
+                    pass
 
             mute_log = guild.get_channel(LOG_MUTE)
             if mute_log:
@@ -225,7 +240,10 @@ async def on_message(message):
                     color=discord.Color.dark_purple(),
                     timestamp=now
                 )
-                await mute_log.send(embed=embed)
+                try:
+                    await mute_log.send(embed=embed)
+                except:
+                    pass
 
             user_mentions[author.id].clear()
             return
@@ -244,7 +262,10 @@ async def on_message(message):
 
         alert_channel = guild.get_channel(MUTE_ALERT_CHANNEL)
         if alert_channel:
-            await alert_channel.send(f"تم كتم {author.mention} تلقائيا بسبب مخالفة قوانين السيرفر")
+            try:
+                await alert_channel.send(f"تم كتم {author.mention} تلقائيا بسبب مخالفة قوانين السيرفر")
+            except:
+                pass
 
         mute_log = guild.get_channel(LOG_MUTE)
         if mute_log:
@@ -254,11 +275,15 @@ async def on_message(message):
                 color=discord.Color.dark_purple(),
                 timestamp=now
             )
-            await mute_log.send(embed=embed)
+            try:
+                await mute_log.send(embed=embed)
+            except:
+                pass
 
         user_messages[author.id].clear()
         return
 
+    # معالجة الأوامر العادية في نهاية الحدث
     await bot.process_commands(message)
 
 # ----------------------------------------------------
@@ -422,7 +447,7 @@ async def on_member_ban(guild, user):
         return
     async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
         if entry.target.id == user.id:
-            reason = entry.reason or "لا يوجد سبب مرفق"
+            reason = entry.reason or "log_ban"
             embed = discord.Embed(
                 title="🔨 سجل حظر عضو (Ban)",
                 description=f"**العضو المحظور:** {user.mention}\n**المسؤول:** {entry.user.mention}\n**السبب:** {reason}",
