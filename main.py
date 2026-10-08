@@ -81,6 +81,9 @@ class TicketModal(discord.ui.Modal):
         self.add_item(self.detail_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # الرد الفوري لمنع مهلة الـ 3 ثواني من ديسكورد
+        await interaction.response.defer(ephemeral=True)
+
         guild = interaction.guild
         user = interaction.user
         now = datetime.datetime.utcnow()
@@ -107,7 +110,7 @@ class TicketModal(discord.ui.Modal):
             except:
                 pass
 
-            await interaction.response.send_message("✅ تم إرسال اقتراحك بنجاح، شكراً لك!", ephemeral=True)
+            await interaction.followup.send("✅ تم إرسال اقتراحك بنجاح، شكراً لك!", ephemeral=True)
             return
 
         # ب. تحديد الفئة ورولات الإداريين حسب نوع التذكرة
@@ -188,7 +191,7 @@ class TicketModal(discord.ui.Modal):
             active_tickets[ticket_channel.id]["panel_msg_id"] = panel_msg.id
             active_tickets[ticket_channel.id]["panel_channel_id"] = panel_log_channel.id
 
-        await interaction.response.send_message(f"✅ تم فتح تذكرتك بنجاح: {ticket_channel.mention}", ephemeral=True)
+        await interaction.followup.send(f"✅ تم فتح تذكرتك بنجاح: {ticket_channel.mention}", ephemeral=True)
 
 
 # ==========================================
@@ -221,7 +224,7 @@ class AdminSelect(discord.ui.Select):
         role = guild.get_role(ROLE_TRANSFER_TARGET)
         options = []
         if role:
-            for member in role.members[:25]: # ديسكورد يتيح حتى 25 خياراً كحد أقصى في القائمة
+            for member in role.members[:25]: 
                 options.append(discord.SelectOption(label=member.display_name, value=str(member.id)))
         
         if not options:
